@@ -1,0 +1,17 @@
+{
+  "name": "rewise-server",
+  "version": "1.0.0",
+  "description": "Backend server for Rewise - Digital Life Lessons Platform",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "rewise",
+    "life-lessons",
+    "express",
+    "mongodb"
+  ],
+  "author": "",
+  "license": "ISC"
+}
