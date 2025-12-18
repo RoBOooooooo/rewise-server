@@ -163,6 +163,128 @@ app.post('/api/lessons', verifyToken, async (req, res) => {
     }
 });
 
+// Get all public lessons with pagination and filters
+app.get('/api/lessons', async (req, res) => {
+    try {
+        const lessonsCollection = getLessonsCollection();
+
+        // Pagination
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        // Build filter query
+        const filter = { visibility: 'public' };
+
+        if (req.query.category) {
+            filter.category = req.query.category;
+        }
+
+        if (req.query.emotionalTone) {
+            filter.emotionalTone = req.query.emotionalTone;
+        }
+
+        // Sorting
+        const sort = {};
+        if (req.query.sort === 'newest') {
+            sort.createdAt = -1;
+        } else if (req.query.sort === 'oldest') {
+            sort.createdAt = 1;
+        } else if (req.query.sort === 'popular') {
+            sort.likesCount = -1;
+        } else {
+            sort.createdAt = -1; // Default: newest first
+        }
+
+        // Get lessons
+        const lessons = await lessonsCollection
+            .find(filter)
+            .sort(sort)
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+
+        // Get total count for pagination
+        const total = await lessonsCollection.countDocuments(filter);
+
+        res.json({
+            lessons,
+            pagination: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit)
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching lessons:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get single lesson by ID
+app.get('/api/lessons/:id', async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const lessonsCollection = getLessonsCollection();
+
+        // Validate ObjectId
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const lesson = await lessonsCollection.findOne({
+            _id: new ObjectId(req.params.id)
+        });
+
+        if (!lesson) {
+            return res.status(404).json({ error: 'Lesson not found' });
+        }
+
+        // Check visibility
+        if (lesson.visibility === 'private') {
+            return res.status(403).json({ error: 'This lesson is private' });
+        }
+
+        // Check premium access
+        if (lesson.accessLevel === 'premium') {
+            // Check if user is authenticated and premium
+            const authHeader = req.headers.authorization;
+
+            if (!authHeader || !authHeader.startsWith('Bearer ')) {
+                return res.status(403).json({
+                    error: 'Premium lesson - Authentication required',
+                    isPremiumContent: true
+                });
+            }
+
+            try {
+                const token = authHeader.split(' ')[1];
+                const decodedToken = await admin.auth().verifyIdToken(token);
+                const usersCollection = getUsersCollection();
+                const user = await usersCollection.findOne({ email: decodedToken.email });
+
+                if (!user || !user.isPremium) {
+                    return res.status(403).json({
+                        error: 'Premium lesson - Premium subscription required',
+                        isPremiumContent: true
+                    });
+                }
+            } catch (error) {
+                return res.status(403).json({
+                    error: 'Premium lesson - Invalid authentication',
+                    isPremiumContent: true
+                });
+            }
+        }
+
+        res.json(lesson);
+    } catch (error) {
+        console.error('Error fetching lesson:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Start server after DB connection
 const PORT = process.env.PORT || 5000;
 
