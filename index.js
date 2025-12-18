@@ -39,9 +39,41 @@ async function connectDB() {
     }
 }
 
+// JWT Verification Middleware
+async function verifyToken(req, res, next) {
+    try {
+        const authHeader = req.headers.authorization;
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Unauthorized - No token provided' });
+        }
+
+        const token = authHeader.split(' ')[1];
+        const decodedToken = await admin.auth().verifyIdToken(token);
+
+        req.user = {
+            email: decodedToken.email,
+            uid: decodedToken.uid
+        };
+
+        next();
+    } catch (error) {
+        console.error('Token verification error:', error);
+        return res.status(401).json({ error: 'Unauthorized - Invalid token' });
+    }
+}
+
 // Root route - Health check
 app.get('/', (req, res) => {
     res.send('Rewise server is running');
+});
+
+// Test protected route
+app.get('/api/test-auth', verifyToken, (req, res) => {
+    res.json({
+        message: 'Authentication successful',
+        user: req.user
+    });
 });
 
 // Start server after DB connection
