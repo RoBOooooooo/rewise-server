@@ -39,6 +39,10 @@ async function connectDB() {
     }
 }
 
+// Collection references
+const getUsersCollection = () => db.collection('users');
+const getLessonsCollection = () => db.collection('lessons');
+
 // JWT Verification Middleware
 async function verifyToken(req, res, next) {
     try {
@@ -51,9 +55,32 @@ async function verifyToken(req, res, next) {
         const token = authHeader.split(' ')[1];
         const decodedToken = await admin.auth().verifyIdToken(token);
 
+        // Sync user with database
+        const usersCollection = getUsersCollection();
+        const email = decodedToken.email;
+
+        let user = await usersCollection.findOne({ email });
+
+        if (!user) {
+            // Create new user with default values
+            const newUser = {
+                name: decodedToken.name || 'Anonymous',
+                email: email,
+                photo: decodedToken.picture || '',
+                role: 'user',
+                isPremium: false,
+                createdAt: new Date()
+            };
+            await usersCollection.insertOne(newUser);
+            user = newUser;
+        }
+
+        // Attach user info to request
         req.user = {
-            email: decodedToken.email,
-            uid: decodedToken.uid
+            email: user.email,
+            uid: decodedToken.uid,
+            role: user.role,
+            isPremium: user.isPremium
         };
 
         next();
@@ -74,6 +101,23 @@ app.get('/api/test-auth', verifyToken, (req, res) => {
         message: 'Authentication successful',
         user: req.user
     });
+});
+
+// Get current user profile
+app.get('/api/user/me', verifyToken, async (req, res) => {
+    try {
+        const usersCollection = getUsersCollection();
+        const user = await usersCollection.findOne({ email: req.user.email });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        res.json(user);
+    } catch (error) {
+        console.error('Error fetching user:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // Start server after DB connection
