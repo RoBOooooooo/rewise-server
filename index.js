@@ -120,6 +120,49 @@ app.get('/api/user/me', verifyToken, async (req, res) => {
     }
 });
 
+// Create a new lesson
+app.post('/api/lessons', verifyToken, async (req, res) => {
+    try {
+        const { title, description, category, emotionalTone, image, visibility, accessLevel } = req.body;
+
+        // Validate required fields
+        if (!title || !description || !category || !emotionalTone) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        // Check if user can create premium lessons
+        if (accessLevel === 'premium' && !req.user.isPremium) {
+            return res.status(403).json({ error: 'Only premium users can create premium lessons' });
+        }
+
+        // Create lesson document
+        const newLesson = {
+            title,
+            description,
+            category,
+            emotionalTone,
+            image: image || '',
+            visibility: visibility || 'public',
+            accessLevel: accessLevel || 'free',
+            creatorEmail: req.user.email,
+            likesCount: 0,
+            likes: [],
+            createdAt: new Date()
+        };
+
+        const lessonsCollection = getLessonsCollection();
+        const result = await lessonsCollection.insertOne(newLesson);
+
+        res.status(201).json({
+            message: 'Lesson created successfully',
+            lessonId: result.insertedId
+        });
+    } catch (error) {
+        console.error('Error creating lesson:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Start server after DB connection
 const PORT = process.env.PORT || 5000;
 
