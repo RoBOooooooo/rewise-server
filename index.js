@@ -6,6 +6,7 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
 const admin = require('firebase-admin');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // Initialize Express app
 const app = express();
@@ -281,6 +282,49 @@ app.get('/api/lessons/:id', async (req, res) => {
         res.json(lesson);
     } catch (error) {
         console.error('Error fetching lesson:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Create Stripe checkout session for premium upgrade
+app.post('/api/create-checkout-session', verifyToken, async (req, res) => {
+    try {
+        // Check if user is already premium
+        if (req.user.isPremium) {
+            return res.status(400).json({ error: 'You are already a premium user' });
+        }
+
+        // Create Stripe checkout session
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [
+                {
+                    price_data: {
+                        currency: 'bdt',
+                        product_data: {
+                            name: 'Rewise Premium Subscription',
+                            description: 'One-time payment for lifetime premium access'
+                        },
+                        unit_amount: 150000 // ৳1500 in paisa (1500 * 100)
+                    },
+                    quantity: 1
+                }
+            ],
+            mode: 'payment',
+            success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
+            client_reference_id: req.user.email,
+            metadata: {
+                userEmail: req.user.email
+            }
+        });
+
+        res.json({
+            sessionId: session.id,
+            url: session.url
+        });
+    } catch (error) {
+        console.error('Error creating checkout session:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
