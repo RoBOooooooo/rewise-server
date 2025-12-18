@@ -13,6 +13,44 @@ const app = express();
 
 // Middleware
 app.use(cors());
+
+// Stripe webhook endpoint (must be before express.json())
+app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    let event;
+
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+        console.error('Webhook signature verification failed:', err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Handle the checkout.session.completed event
+    if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const userEmail = session.metadata.userEmail || session.client_reference_id;
+
+        if (userEmail) {
+            try {
+                const usersCollection = getUsersCollection();
+                await usersCollection.updateOne(
+                    { email: userEmail },
+                    { $set: { isPremium: true } }
+                );
+                console.log(`User ${userEmail} upgraded to premium`);
+            } catch (error) {
+                console.error('Error updating user premium status:', error);
+            }
+        }
+    }
+
+    res.json({ received: true });
+});
+
+// JSON parser for all other routes
 app.use(express.json());
 
 // Initialize Firebase Admin SDK
