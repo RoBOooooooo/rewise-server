@@ -5,6 +5,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
+const admin = require('firebase-admin');
 
 // Initialize Express app
 const app = express();
@@ -12,6 +13,15 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Initialize Firebase Admin SDK
+admin.initializeApp({
+    credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n')
+    })
+});
 
 // MongoDB connection
 const client = new MongoClient(process.env.MONGODB_URI);
