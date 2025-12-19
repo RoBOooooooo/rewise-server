@@ -134,6 +134,15 @@ app.get('/', (req, res) => {
     res.send('Rewise server is running');
 });
 
+// Health check route
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'OK',
+        message: 'Rewise server is healthy',
+        timestamp: new Date().toISOString()
+    });
+});
+
 // Test protected route
 app.get('/api/test-auth', verifyToken, (req, res) => {
     res.json({
@@ -155,6 +164,26 @@ app.get('/api/user/me', verifyToken, async (req, res) => {
         res.json(user);
     } catch (error) {
         console.error('Error fetching user:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get lessons created by logged-in user
+app.get('/api/my-lessons', verifyToken, async (req, res) => {
+    try {
+        const lessonsCollection = getLessonsCollection();
+
+        const myLessons = await lessonsCollection
+            .find({ creatorEmail: req.user.email })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+        res.json({
+            lessons: myLessons,
+            total: myLessons.length
+        });
+    } catch (error) {
+        console.error('Error fetching user lessons:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -363,6 +392,231 @@ app.post('/api/create-checkout-session', verifyToken, async (req, res) => {
         });
     } catch (error) {
         console.error('Error creating checkout session:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Like/Unlike a lesson
+app.post('/api/lessons/:id/like', verifyToken, async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const lessonsCollection = getLessonsCollection();
+
+        // Validate ObjectId
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const lessonId = new ObjectId(req.params.id);
+        const userEmail = req.user.email;
+
+        // Find the lesson
+        const lesson = await lessonsCollection.findOne({ _id: lessonId });
+
+        if (!lesson) {
+            return res.status(404).json({ error: 'Lesson not found' });
+        }
+
+        // Check if user already liked
+        const hasLiked = lesson.likes && lesson.likes.includes(userEmail);
+
+        if (hasLiked) {
+            // Unlike: Remove user from likes array
+            await lessonsCollection.updateOne(
+                { _id: lessonId },
+                {
+                    $pull: { likes: userEmail },
+                    $inc: { likesCount: -1 }
+                }
+            );
+            res.json({ message: 'Lesson unliked', liked: false });
+        } else {
+            // Like: Add user to likes array
+            await lessonsCollection.updateOne(
+                { _id: lessonId },
+                {
+                    $addToSet: { likes: userEmail },
+                    $inc: { likesCount: 1 }
+                }
+            );
+            res.json({ message: 'Lesson liked', liked: true });
+        }
+    } catch (error) {
+        console.error('Error toggling like:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Update a lesson (creator only)
+app.patch('/api/lessons/:id', verifyToken, async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const lessonsCollection = getLessonsCollection();
+
+        // Validate ObjectId
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const lessonId = new ObjectId(req.params.id);
+
+        // Find the lesson
+        const lesson = await lessonsCollection.findOne({ _id: lessonId });
+
+        if (!lesson) {
+            return res.status(404).json({ error: 'Lesson not found' });
+        }
+
+        // Check if user is the creator
+        if (lesson.creatorEmail !== req.user.email) {
+            return res.status(403).json({ error: 'You can only update your own lessons' });
+        }
+
+        // Build update object with allowed fields
+        const { title, description, category, emotionalTone, image, visibility, accessLevel } = req.body;
+        const updateFields = {};
+
+        if (title) updateFields.title = title;
+        if (description) updateFields.description = description;
+        if (category) updateFields.category = category;
+        if (emotionalTone) updateFields.emotionalTone = emotionalTone;
+        if (image !== undefined) updateFields.image = image;
+        if (visibility) updateFields.visibility = visibility;
+        if (accessLevel) updateFields.accessLevel = accessLevel;
+
+        // Check premium access for accessLevel
+        if (accessLevel === 'premium' && !req.user.isPremium) {
+            return res.status(403).json({ error: 'Only premium users can create premium lessons' });
+        }
+
+        // Update the lesson
+        await lessonsCollection.updateOne(
+            { _id: lessonId },
+            { $set: updateFields }
+        );
+
+        res.json({ message: 'Lesson updated successfully' });
+    } catch (error) {
+        console.error('Error updating lesson:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Delete a lesson (creator only)
+app.delete('/api/lessons/:id', verifyToken, async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const lessonsCollection = getLessonsCollection();
+
+        // Validate ObjectId
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const lessonId = new ObjectId(req.params.id);
+
+        // Find the lesson
+        const lesson = await lessonsCollection.findOne({ _id: lessonId });
+
+        if (!lesson) {
+            return res.status(404).json({ error: 'Lesson not found' });
+        }
+
+        // Check if user is the creator
+        if (lesson.creatorEmail !== req.user.email) {
+            return res.status(403).json({ error: 'You can only delete your own lessons' });
+        }
+
+        // Delete the lesson
+        await lessonsCollection.deleteOne({ _id: lessonId });
+
+        res.json({ message: 'Lesson deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting lesson:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Toggle favorite (add/remove)
+app.post('/api/lessons/:id/favorite', verifyToken, async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const lessonsCollection = getLessonsCollection();
+        const usersCollection = getUsersCollection();
+
+        // Validate ObjectId
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ error: 'Invalid lesson ID' });
+        }
+
+        const lessonId = req.params.id;
+
+        // Check if lesson exists
+        const lesson = await lessonsCollection.findOne({ _id: new ObjectId(lessonId) });
+        if (!lesson) {
+            return res.status(404).json({ error: 'Lesson not found' });
+        }
+
+        // Get user
+        const user = await usersCollection.findOne({ email: req.user.email });
+        const favorites = user.favorites || [];
+
+        // Check if already favorited
+        const isFavorited = favorites.includes(lessonId);
+
+        if (isFavorited) {
+            // Remove from favorites
+            await usersCollection.updateOne(
+                { email: req.user.email },
+                { $pull: { favorites: lessonId } }
+            );
+            res.json({ message: 'Removed from favorites', favorited: false });
+        } else {
+            // Add to favorites
+            await usersCollection.updateOne(
+                { email: req.user.email },
+                { $addToSet: { favorites: lessonId } }
+            );
+            res.json({ message: 'Added to favorites', favorited: true });
+        }
+    } catch (error) {
+        console.error('Error toggling favorite:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get user's favorite lessons
+app.get('/api/my-favorites', verifyToken, async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const usersCollection = getUsersCollection();
+        const lessonsCollection = getLessonsCollection();
+
+        // Get user's favorites
+        const user = await usersCollection.findOne({ email: req.user.email });
+        const favoriteIds = user.favorites || [];
+
+        if (favoriteIds.length === 0) {
+            return res.json({ lessons: [], total: 0 });
+        }
+
+        // Convert string IDs to ObjectIds
+        const objectIds = favoriteIds
+            .filter(id => ObjectId.isValid(id))
+            .map(id => new ObjectId(id));
+
+        // Get favorite lessons
+        const favoriteLessons = await lessonsCollection
+            .find({ _id: { $in: objectIds } })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+        res.json({
+            lessons: favoriteLessons,
+            total: favoriteLessons.length
+        });
+    } catch (error) {
+        console.error('Error fetching favorites:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
