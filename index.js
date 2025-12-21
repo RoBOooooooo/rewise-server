@@ -1,4 +1,3 @@
-// Load environment variables
 require("dotenv").config();
 
 // Import dependencies
@@ -33,7 +32,7 @@ app.use(
     origin: function (origin, callback) {
       const allowedOrigins = [
         "http://localhost:5173",
-        "https://rewise-app.vercel.app",
+        "https://rewise-arif.vercel.app",
       ];
 
       if (!origin) return callback(null, true);
@@ -164,6 +163,10 @@ const getCommentsCollection = () => {
   if (!db) throw new Error("Database not connected");
   return db.collection("comments");
 };
+const getFavoritesCollection = () => {
+  if (!db) throw new Error("Database not connected");
+  return db.collection("favorites");
+};
 
 // JWT Verification Middleware
 async function verifyToken(req, res, next) {
@@ -184,10 +187,6 @@ async function verifyToken(req, res, next) {
     const email = decodedToken.email;
 
     let user = await usersCollection.findOne({ email });
-
-    // If user doesn't exist in DB, we rely on the token info for the request context,
-    // but we do NOT create the user here. The client must call POST /api/users
-    // to properly sync/create the user record.
 
     // Attach user info to request
     req.user = {
@@ -249,16 +248,40 @@ app.get("/api/admin/reports", verifyToken, verifyAdmin, async (req, res) => {
     const { ObjectId } = require("mongodb");
     const reportsCollection = getReportsCollection();
     const { lessonId } = req.query;
-    let filter = {};
 
+    // Build Aggregation Pipeline
+    const pipeline = [];
+
+    // 1. Filter by specific lesson (optional)
     if (lessonId) {
       if (!ObjectId.isValid(lessonId)) {
         return res.status(400).json({ error: "Invalid lesson ID" });
       }
-      filter.lessonId = new ObjectId(lessonId);
+      pipeline.push({ $match: { lessonId: new ObjectId(lessonId) } });
     }
 
-    const reports = await reportsCollection.find(filter).toArray();
+    // 2. Lookup Lesson Details
+    pipeline.push({
+      $lookup: {
+        from: "lessons",
+        localField: "lessonId",
+        foreignField: "_id",
+        as: "lesson"
+      }
+    });
+
+    // 3. Unwind Lesson (keep report even if lesson deleted)
+    pipeline.push({
+      $unwind: {
+        path: "$lesson",
+        preserveNullAndEmptyArrays: true
+      }
+    });
+
+    // 4. Sort by Newest Report
+    pipeline.push({ $sort: { createdAt: -1 } });
+
+    const reports = await reportsCollection.aggregate(pipeline).toArray();
     res.json(reports);
   } catch (error) {
     console.error("Error fetching reports:", error);
@@ -392,6 +415,7 @@ app.post("/api/users/:email", verifyToken, async (req, res) => {
     const newUser = {
       name: name || "Anonymous",
       email: email,
+      photo: photo || "",
       photo: photo || "",
       uid: uid || "", // Optional: store firebase UID
       role: "user",
@@ -649,8 +673,6 @@ app.get("/api/public/analytics", async (req, res) => {
     const usersCollection = getUsersCollection();
     const lessonsCollection = getLessonsCollection();
 
-    // Top Contributors: Users with most lessons
-    // Note: Better to track 'lessonsCount' in user doc, but aggregation works too
     const topContributors = await lessonsCollection
       .aggregate([
         { $group: { _id: "$creatorEmail", count: { $sum: 1 } } },
@@ -659,7 +681,6 @@ app.get("/api/public/analytics", async (req, res) => {
       ])
       .toArray();
 
-    // Hydrate contributor details
     const contributorEmails = topContributors.map((c) => c._id);
     const authors = await usersCollection
       .find({ email: { $in: contributorEmails } })
@@ -674,8 +695,6 @@ app.get("/api/public/analytics", async (req, res) => {
       };
     });
 
-    // Most Saved Lessons (Simulated by likes for now, as Favorites is in User array)
-    // Ideally we aggregation on User collection unwinding favorites, but 'likesCount' is a good proxy for popularity
     const mostPopularLessons = await lessonsCollection
       .find({ visibility: "public" })
       .sort({ likesCount: -1 })
@@ -887,7 +906,26 @@ app.get("/api/lessons/:id", async (req, res) => {
 
     // Check visibility
     if (lesson.visibility === "private") {
-      return res.status(403).json({ error: "This lesson is private" });
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(403).json({ error: "Private lesson - Authentication required" });
+      }
+
+      try {
+        const token = authHeader.split(" ")[1];
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        const usersCollection = getUsersCollection();
+        const user = await usersCollection.findOne({ email: decodedToken.email });
+
+        const isCreator = lesson.creatorEmail === decodedToken.email;
+        const isAdmin = user && user.role === "admin";
+
+        if (!isCreator && !isAdmin) {
+          return res.status(403).json({ error: "Private lesson - Restricted access" });
+        }
+      } catch (error) {
+        return res.status(403).json({ error: "Private lesson - Invalid token" });
+      }
     }
 
     // Check premium access
@@ -1198,43 +1236,53 @@ app.post("/api/lessons/:id/favorite", verifyToken, async (req, res) => {
   try {
     const { ObjectId } = require("mongodb");
     const lessonsCollection = getLessonsCollection();
-    const usersCollection = getUsersCollection();
+    const favoritesCollection = getFavoritesCollection();
 
     // Validate ObjectId
     if (!ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: "Invalid lesson ID" });
     }
 
-    const lessonId = req.params.id;
+    const lessonId = new ObjectId(req.params.id);
+    const userEmail = req.user.email;
 
     // Check if lesson exists
-    const lesson = await lessonsCollection.findOne({
-      _id: new ObjectId(lessonId),
-    });
+    const lesson = await lessonsCollection.findOne({ _id: lessonId });
     if (!lesson) {
       return res.status(404).json({ error: "Lesson not found" });
     }
 
-    // Get user
-    const user = await usersCollection.findOne({ email: req.user.email });
-    const favorites = user.favorites || [];
-
     // Check if already favorited
-    const isFavorited = favorites.includes(lessonId);
+    const existingFavorite = await favoritesCollection.findOne({
+      userEmail: userEmail,
+      lessonId: lessonId
+    });
 
-    if (isFavorited) {
-      // Remove from favorites
-      await usersCollection.updateOne(
-        { email: req.user.email },
-        { $pull: { favorites: lessonId } }
+    if (existingFavorite) {
+      // Remove from favorites collection
+      await favoritesCollection.deleteOne({ _id: existingFavorite._id });
+
+      // Remove from User profile (Legacy/Backup support)
+      await getUsersCollection().updateOne(
+        { email: userEmail },
+        { $pull: { favorites: req.params.id } }
       );
+
       res.json({ message: "Removed from favorites", favorited: false });
     } else {
-      // Add to favorites
-      await usersCollection.updateOne(
-        { email: req.user.email },
-        { $addToSet: { favorites: lessonId } }
+      // Add to favorites collection
+      await favoritesCollection.insertOne({
+        userEmail: userEmail,
+        lessonId: lessonId,
+        createdAt: new Date()
+      });
+
+      // Add to User profile (Legacy/Backup support)
+      await getUsersCollection().updateOne(
+        { email: userEmail },
+        { $addToSet: { favorites: req.params.id } }
       );
+
       res.json({ message: "Added to favorites", favorited: true });
     }
   } catch (error) {
@@ -1304,31 +1352,56 @@ app.post("/api/lessons/:id/comments", verifyToken, async (req, res) => {
   }
 });
 
-// Get user's favorite lessons
+// Get user's favorite lessons (with aggregation for filtering)
 app.get("/api/my-favorites", verifyToken, async (req, res) => {
   try {
     const { ObjectId } = require("mongodb");
-    const usersCollection = getUsersCollection();
-    const lessonsCollection = getLessonsCollection();
+    const favoritesCollection = getFavoritesCollection();
+    // No need to fetch Users/Lessons separately, we use aggregation
 
-    // Get user's favorites
-    const user = await usersCollection.findOne({ email: req.user.email });
-    const favoriteIds = user.favorites || [];
+    const { category, emotionalTone } = req.query;
 
-    if (favoriteIds.length === 0) {
-      return res.json({ lessons: [], total: 0 });
+    const pipeline = [
+      // 1. Match favorites for this user
+      { $match: { userEmail: req.user.email } },
+
+      // 2. Lookup the actual lesson details
+      {
+        $lookup: {
+          from: "lessons",
+          localField: "lessonId",
+          foreignField: "_id",
+          as: "lesson"
+        }
+      },
+
+      // 3. Unwind the lesson array (since lookup returns an array)
+      { $unwind: "$lesson" },
+
+      // 4. Project the lesson fields to root (optional, or keep inside 'lesson')
+      // We will replace root with lesson but keep favorite metadata if needed. 
+      // For simplicity matching the previous API, we return the lessons.
+      {
+        $replaceRoot: { newRoot: "$lesson" }
+      }
+    ];
+
+    // 5. Apply filters on the LESSON fields
+    if (category) {
+      pipeline.push({ $match: { category: category } });
+    }
+    if (emotionalTone) {
+      pipeline.push({ $match: { emotionalTone: emotionalTone } });
     }
 
-    // Convert string IDs to ObjectIds
-    const objectIds = favoriteIds
-      .filter((id) => ObjectId.isValid(id))
-      .map((id) => new ObjectId(id));
+    // Sort by added time? Or lesson creation? 
+    // Requirement says "display tabular format", existing code sorted by createdAt.
+    // Since we replaced root with lesson, 'createdAt' is the lesson's date.
+    // If we want favorited date, we'd need to keep it before replaceRoot.
+    // Let's stick to lesson properties for filters/sort as requested.
 
-    // Get favorite lessons
-    const favoriteLessons = await lessonsCollection
-      .find({ _id: { $in: objectIds } })
-      .sort({ createdAt: -1 })
-      .toArray();
+    // Execute aggregation
+    const favoriteLessons = await favoritesCollection.aggregate(pipeline).toArray();
 
     res.json({
       lessons: favoriteLessons,
